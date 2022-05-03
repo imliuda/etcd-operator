@@ -1,0 +1,18 @@
+componentConfig: true
+domain: imliuda.github.io
+layout:
+- go.kubebuilder.io/v3
+multigroup: true
+projectName: etcd-operator
+repo: github.com/imliuda/etcd-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: imliuda.github.io
+  group: etcd
+  kind: EtcdCluster
+  path: github.com/imliuda/etcd-operator/apis/etcd/v1alpha1
+  version: v1alpha1
+version: "3"
