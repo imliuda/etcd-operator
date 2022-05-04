@@ -42,6 +42,7 @@ type EtcdClusterSpec struct {
 	// The etcd-operator will eventually make the size of the running
 	// cluster equal to the expected size.
 	// The vaild range of the size is from 1 to 7.
+	// +kubebuilder:default=3
 	Size int `json:"size"`
 	// Repository is the name of the repository that hosts
 	// etcd container images. It should be direct clone of the repository in official
@@ -50,6 +51,7 @@ type EtcdClusterSpec struct {
 	// That means, it should have exact same tags and the same meaning for the tags.
 	//
 	// By default, it is `quay.io/coreos/etcd`.
+	// +kubebuilder:default=quay.io/coreos/etcd
 	Repository string `json:"repository,omitempty"`
 
 	// Version is the expected version of the etcd cluster.
@@ -60,9 +62,11 @@ type EtcdClusterSpec struct {
 	// Only etcd released versions are supported: https://github.com/coreos/etcd/releases
 	//
 	// If version is not set, default is "3.2.13".
+	// +kubebuilder:default="3.2.13"
 	Version string `json:"version,omitempty"`
 
 	// Paused is to pause the control of the operator for the etcd cluster.
+	// +kubebuilder:default=false
 	Paused bool `json:"paused,omitempty"`
 
 	// Pod defines the policy to create pod for the etcd pod.
@@ -158,7 +162,7 @@ type PodPolicy struct {
 	// ClusterDomain is the cluster domain to use for member URLs E.g.
 	// '.cluster.local'.
 	// The default is to not set a cluster domain explicitly.
-	ClusterDomain string `json:"ClusterDomain"`
+	ClusterDomain string `json:"ClusterDomain,omitempty"`
 }
 
 // ClusterCondition represents one current condition of an etcd cluster.
@@ -192,16 +196,19 @@ type MembersStatus struct {
 // EtcdClusterStatus defines the observed state of EtcdCluster
 type EtcdClusterStatus struct {
 	// Phase is the cluster running phase
-	Ready bool `json:"phase"`
+	// +kubebuilder:default=false
+	Ready bool `json:"phase,omitempty"`
 
 	// ControlPuased indicates the operator pauses the control of the cluster.
+	// +kubebuilder:default=false
 	ControlPaused bool `json:"controlPaused,omitempty"`
 
 	// Condition keeps track of all cluster conditions, if they exist.
 	Conditions []ClusterCondition `json:"conditions,omitempty"`
 
 	// Size is the current size of the cluster
-	Size int `json:"size"`
+	// +kubebuilder:default=0
+	Size int `json:"size,omitempty"`
 
 	// ServiceName is the LB service for accessing etcd nodes.
 	ServiceName string `json:"serviceName,omitempty"`
@@ -211,16 +218,22 @@ type EtcdClusterStatus struct {
 	ClientPort int `json:"clientPort,omitempty"`
 
 	// Members are the etcd members in the cluster
-	Members MembersStatus `json:"members"`
+	Members MembersStatus `json:"members,omitempty"`
 	// CurrentVersion is the current cluster version
-	CurrentVersion string `json:"currentVersion"`
+	CurrentVersion string `json:"currentVersion,omitempty"`
 	// TargetVersion is the version the cluster upgrading to.
 	// If the cluster is not upgrading, TargetVersion is empty.
-	TargetVersion string `json:"targetVersion"`
+	TargetVersion string `json:"targetVersion,omitempty"`
+	// LabelSelector is for hpa
+	LabelSelector string `json:"labelSelector,omitempty"`
 }
 
-//+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
+// https://medium.com/@thescott111/autoscaling-kubernetes-custom-resource-using-the-hpa-957d00bb7993
+// https://kubernetes.io/zh/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/
+//
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.size,statuspath=.status.size,selectorpath=.status.labelSelector
 
 // EtcdCluster is the Schema for the etcdclusters API
 type EtcdCluster struct {

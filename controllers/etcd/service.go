@@ -33,8 +33,9 @@ func NewEtcdService(cluster *etcdv1alpha1.EtcdCluster, svcName, clusterIP string
 	labels_ := LabelsForCluster(cluster)
 	service := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   svcName,
-			Labels: labels_,
+			Name:      svcName,
+			Namespace: cluster.Namespace,
+			Labels:    labels_,
 		},
 		Spec: v1.ServiceSpec{
 			Ports:                    ports,
@@ -47,36 +48,43 @@ func NewEtcdService(cluster *etcdv1alpha1.EtcdCluster, svcName, clusterIP string
 }
 
 func ClientServiceName(cluster *etcdv1alpha1.EtcdCluster) string {
-	return cluster.Name + "-peer"
+	return cluster.Name + "-client"
 }
 
 func NewClientService(cluster *etcdv1alpha1.EtcdCluster) *v1.Service {
 	ports := []v1.ServicePort{{
-		Name:       "client",
+		Name:       "etcd-client",
 		Port:       ClientPort,
 		TargetPort: intstr.FromInt(ClientPort),
 		Protocol:   v1.ProtocolTCP,
 	}}
+	if cluster.Spec.TLS.IsSecureClient() {
+		ports[0].Name = "etcd-client-ssl"
+	}
 	service := NewEtcdService(cluster, ClientServiceName(cluster), "", ports)
 	return service
 }
 
 func PeerServiceName(cluster *etcdv1alpha1.EtcdCluster) string {
-	return cluster.Name + "-peer"
+	return cluster.Name
 }
 
 func NewPeerService(cluster *etcdv1alpha1.EtcdCluster) *v1.Service {
 	ports := []v1.ServicePort{{
-		Name:       "client",
+		Name:       "etcd-client",
 		Port:       ClientPort,
 		TargetPort: intstr.FromInt(ClientPort),
 		Protocol:   v1.ProtocolTCP,
 	}, {
-		Name:       "peer",
+		Name:       "etcd-server",
 		Port:       PeerPort,
 		TargetPort: intstr.FromInt(PeerPort),
 		Protocol:   v1.ProtocolTCP,
 	}}
-	service := NewEtcdService(cluster, PeerServiceName(cluster), "", ports)
+	if cluster.Spec.TLS.IsSecurePeer() {
+		ports[0].Name = "etcd-client-ssl"
+		ports[1].Name = "etcd-server-ssl"
+	}
+	service := NewEtcdService(cluster, PeerServiceName(cluster), v1.ClusterIPNone, ports)
 	return service
 }

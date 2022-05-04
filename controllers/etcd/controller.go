@@ -19,7 +19,6 @@ package etcd
 import (
 	"context"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sync"
@@ -75,11 +74,11 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Only one reconcile can be execute for a cluster at the same time
-	namespacedName := types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}
-	if _, ok := r.locks.LoadOrStore(namespacedName.String(), true); ok {
-		return ctrl.Result{Requeue: true}, nil
-	}
+	// Controller's work queue will ensure there is only one worker for a key
+	// if _, loaded := r.locks.LoadOrStore(req.NamespacedName, true); loaded {
+	// 	return ctrl.Result{Requeue: true}, nil
+	// }
+	// defer r.locks.Delete(req.NamespacedName)
 
 	desired := cluster.DeepCopy()
 
@@ -125,18 +124,14 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// 1. Create service
+	// 1. Ensure services
+	logger.Info("Ensuring cluster services", "cluster", cluster.Name)
 	if err := r.ensureService(ctx, cluster); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 2. Create seed pod
-	if err := r.ensureSeedPod(ctx, cluster); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// 3. Create rest pods, pods number equal spec.Size
-	// When this step done, the cluster may have old version pod, or have been marked as deleted
+	// 2. Ensure pods
+	logger.Info("Ensuring cluster pods", "cluster", cluster.Name)
 	if err := r.ensurePods(ctx, cluster); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -216,11 +211,11 @@ func (r *ClusterFilter) Generic(evt event.GenericEvent) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *EtcdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	filter := &ClusterFilter{}
+	//filter := &ClusterFilter{}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&etcdv1alpha1.EtcdCluster{}).
 		Owns(&v1.Pod{}).
 		Owns(&v1.Service{}).
-		WithEventFilter(filter).
+		//WithEventFilter(filter).
 		Complete(r)
 }

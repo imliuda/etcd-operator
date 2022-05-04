@@ -4,7 +4,7 @@ go 1.16
 
 require (
 	github.com/coreos/etcd v3.3.13+incompatible
-	github.com/google/uuid v1.1.2
+	github.com/google/uuid v1.1.2 // indirect
 	github.com/onsi/ginkgo v1.16.4
 	github.com/onsi/gomega v1.15.0
 	google.golang.org/grpc v1.46.0 // indirect

@@ -3,4 +3,14 @@ kind: EtcdCluster
 metadata:
   name: etcdcluster-sample
 spec:
-  # TODO(user): Add fields here
+  size: 3
+  version: "3.2.13"
+  pod:
+    persistentVolumeClaimSpec:
+      accessModes: 
+      - ReadWriteOnce
+      volumeMode: Filesystem
+      resources:
+        requests:
+          storage: 1Gi
+      storageClassName: nfs-client

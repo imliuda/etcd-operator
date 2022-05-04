@@ -66,6 +66,7 @@ spec:
                     type: object
                 type: object
               paused:
+                default: false
                 description: Paused is to pause the control of the operator for the
                   etcd cluster.
                 type: boolean
@@ -1488,10 +1489,9 @@ spec:
                           type: string
                       type: object
                     type: array
-                required:
-                - ClusterDomain
                 type: object
               repository:
+                default: quay.io/coreos/etcd
                 description: "Repository is the name of the repository that hosts
                   etcd container images. It should be direct clone of the repository
                   in official release:   https://github.com/coreos/etcd/releases That
@@ -1499,11 +1499,13 @@ spec:
                   tags. \n By default, it is `quay.io/coreos/etcd`."
                 type: string
               size:
+                default: 3
                 description: Size is the expected size of the etcd cluster. The etcd-operator
                   will eventually make the size of the running cluster equal to the
                   expected size. The vaild range of the size is from 1 to 7.
                 type: integer
               version:
+                default: 3.2.13
                 description: "Version is the expected version of the etcd cluster.
                   The etcd-operator will eventually make the etcd cluster version
                   equal to the expected version. \n The version must follow the [semver](
@@ -1558,11 +1560,15 @@ spec:
                   type: object
                 type: array
               controlPaused:
+                default: false
                 description: ControlPuased indicates the operator pauses the control
                   of the cluster.
                 type: boolean
               currentVersion:
                 description: CurrentVersion is the current cluster version
+                type: string
+              labelSelector:
+                description: LabelSelector is for hpa
                 type: string
               members:
                 description: Members are the etcd members in the cluster
@@ -1580,29 +1586,29 @@ spec:
                     type: array
                 type: object
               phase:
+                default: false
                 description: Phase is the cluster running phase
                 type: boolean
               serviceName:
                 description: ServiceName is the LB service for accessing etcd nodes.
                 type: string
               size:
+                default: 0
                 description: Size is the current size of the cluster
                 type: integer
               targetVersion:
                 description: TargetVersion is the version the cluster upgrading to.
                   If the cluster is not upgrading, TargetVersion is empty.
                 type: string
-            required:
-            - currentVersion
-            - members
-            - phase
-            - size
-            - targetVersion
             type: object
         type: object
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.labelSelector
+        specReplicasPath: .spec.size
+        statusReplicasPath: .status.size
       status: {}
 status:
   acceptedNames:

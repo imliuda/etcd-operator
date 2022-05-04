@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -38,6 +39,9 @@ type Member struct {
 
 	// ClusterDomain is the DNS name of the cluster. E.g. .cluster.local.
 	ClusterDomain string
+
+	RunningAndReady bool
+	Version         string
 }
 
 func (m *Member) Addr() string {
@@ -95,6 +99,17 @@ func (ms MemberSet) Diff(other MemberSet) MemberSet {
 	return diff
 }
 
+func (ms MemberSet) Get(id int) *Member {
+	for _, m := range ms {
+		idx := strings.LastIndex(m.Name, "-")
+		mid, _ := strconv.ParseInt(m.Name[idx+1:], 10, 32)
+		if int(mid) == id {
+			return m
+		}
+	}
+	return nil
+}
+
 // IsEqual tells whether two member sets are equal by checking
 // - they have the same set of members and member equality are judged by Name only.
 func (ms MemberSet) IsEqual(other MemberSet) bool {
@@ -116,8 +131,8 @@ func (ms MemberSet) Size() int {
 func (ms MemberSet) String() string {
 	var mstring []string
 
-	for m := range ms {
-		mstring = append(mstring, m)
+	for m, v := range ms {
+		mstring = append(mstring, fmt.Sprintf("%s:%s", m, v.Version))
 	}
 	return strings.Join(mstring, ",")
 }
@@ -151,6 +166,16 @@ func (ms MemberSet) ClientURLs() []string {
 		endpoints = append(endpoints, m.ClientURL())
 	}
 	return endpoints
+}
+
+func (ms MemberSet) Ordinals() map[int]bool {
+	ids := map[int]bool{}
+	for _, m := range ms {
+		idx := strings.LastIndex(m.Name, "-")
+		id, _ := strconv.ParseInt(m.Name[idx+1:], 10, 32)
+		ids[int(id)] = true
+	}
+	return ids
 }
 
 var validPeerURL = regexp.MustCompile(`^\w+:\/\/[\w\.\-]+(:\d+)?$`)

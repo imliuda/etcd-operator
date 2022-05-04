@@ -115,8 +115,8 @@ func AddEtcdVolumeToPod(pod *v1.Pod, pvc *v1.PersistentVolumeClaim) {
 	pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
 }
 
-func NewEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []string, state, token string) *v1.Pod {
-	pod := newEtcdPod(cluster, m, initialCluster, state, token)
+func NewEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, state string) *v1.Pod {
+	pod := newEtcdPod(cluster, m, state)
 	applyPodPolicy(pod, cluster.Spec.Pod)
 	return pod
 }
@@ -134,11 +134,15 @@ func NewEtcdPodPVC(cluster *etcdv1alpha1.EtcdCluster, m *Member) *v1.PersistentV
 	return pvc
 }
 
-func newEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []string, state, token string) *v1.Pod {
+func newEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, state string) *v1.Pod {
+	discoverySrv := fmt.Sprintf("%s.%s.svc", PeerServiceName(cluster), cluster.Namespace)
+	if m.ClusterDomain != "" {
+		discoverySrv = fmt.Sprintf("%s.%s", discoverySrv, m.ClusterDomain)
+	}
 	commands := fmt.Sprintf("/usr/local/bin/etcd --data-dir=%s --name=%s --initial-advertise-peer-urls=%s "+
 		"--listen-peer-urls=%s --listen-client-urls=%s --advertise-client-urls=%s "+
-		"--initial-cluster=%s --initial-cluster-state=%s",
-		dataDir, m.Name, m.PeerURL(), m.ListenPeerURL(), m.ListenClientURL(), m.ClientURL(), strings.Join(initialCluster, ","), state)
+		"--discovery-srv=%s --initial-cluster-state=%s",
+		dataDir, m.Name, m.PeerURL(), m.ListenPeerURL(), m.ListenClientURL(), m.ClientURL(), discoverySrv, state)
 	if m.SecurePeer {
 		commands += fmt.Sprintf(" --peer-client-cert-auth=true --peer-trusted-ca-file=%[1]s/peer-ca.crt --peer-cert-file=%[1]s/peer.crt --peer-key-file=%[1]s/peer.key", peerTLSDir)
 	}
@@ -146,7 +150,7 @@ func newEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []s
 		commands += fmt.Sprintf(" --client-cert-auth=true --trusted-ca-file=%[1]s/server-ca.crt --cert-file=%[1]s/server.crt --key-file=%[1]s/server.key", serverTLSDir)
 	}
 	if state == "new" {
-		commands = fmt.Sprintf("%s --initial-cluster-token=%s", commands, token)
+		commands = fmt.Sprintf("%s --initial-cluster-token=%s", commands, cluster.Name)
 	}
 
 	livenessProbe := newEtcdProbe(cluster.Spec.TLS.IsSecureClient())
@@ -195,6 +199,7 @@ func newEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []s
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        m.Name,
+			Namespace:   cluster.Namespace,
 			Labels:      LabelsForCluster(cluster),
 			Annotations: map[string]string{},
 		},
@@ -223,13 +228,13 @@ func newEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []s
 					done`, DNSTimeout, m.Addr())},
 			}},
 			Containers:    []v1.Container{container},
-			RestartPolicy: v1.RestartPolicyNever,
+			RestartPolicy: v1.RestartPolicyAlways,
 			Volumes:       volumes,
 			// DNS A record: `[m.Name].[cluster.Name].Namespace.svc`
 			// For example, etcd-795649v9kq in default namesapce will have DNS name
 			// `etcd-795649v9kq.etcd.default.svc`.
 			Hostname:                     m.Name,
-			Subdomain:                    cluster.Name,
+			Subdomain:                    PeerServiceName(cluster),
 			AutomountServiceAccountToken: func(b bool) *bool { return &b }(false),
 			SecurityContext:              podSecurityContext(cluster.Spec.Pod),
 		},
@@ -355,4 +360,49 @@ func imageNameBusybox(policy *etcdv1alpha1.PodPolicy) string {
 		return policy.BusyboxImage
 	}
 	return defaultBusyboxImage
+}
+
+func IsRunningAndReady(pod *v1.Pod) bool {
+	return pod.Status.Phase == v1.PodRunning && IsPodReady(pod)
+}
+
+// IsPodReady returns true if a pod is ready; false otherwise.
+func IsPodReady(pod *v1.Pod) bool {
+	return IsPodReadyConditionTrue(pod.Status)
+}
+
+// IsPodReadyConditionTrue returns true if a pod is ready; false otherwise.
+func IsPodReadyConditionTrue(status v1.PodStatus) bool {
+	condition := GetPodReadyCondition(status)
+	return condition != nil && condition.Status == v1.ConditionTrue
+}
+
+// GetPodReadyCondition extracts the pod ready condition from the given status and returns that.
+// Returns nil if the condition is not present.
+func GetPodReadyCondition(status v1.PodStatus) *v1.PodCondition {
+	_, condition := GetPodCondition(&status, v1.PodReady)
+	return condition
+}
+
+// GetPodCondition extracts the provided condition from the given status and returns that.
+// Returns nil and -1 if the condition is not present, and the index of the located condition.
+func GetPodCondition(status *v1.PodStatus, conditionType v1.PodConditionType) (int, *v1.PodCondition) {
+	if status == nil {
+		return -1, nil
+	}
+	return GetPodConditionFromList(status.Conditions, conditionType)
+}
+
+// GetPodConditionFromList extracts the provided condition from the given list of condition and
+// returns the index of the condition and the condition. Returns -1 and nil if the condition is not present.
+func GetPodConditionFromList(conditions []v1.PodCondition, conditionType v1.PodConditionType) (int, *v1.PodCondition) {
+	if conditions == nil {
+		return -1, nil
+	}
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return i, &conditions[i]
+		}
+	}
+	return -1, nil
 }
