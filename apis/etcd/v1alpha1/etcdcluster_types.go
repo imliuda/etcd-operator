@@ -30,20 +30,29 @@ const (
 	ClusterPhaseRunning               = "Running"
 	ClusterPhaseFailed                = "Failed"
 
-	ClusterConditionAvailable  ClusterConditionType = "Available"
-	ClusterConditionRecovering                      = "Recovering"
-	ClusterConditionScaling                         = "Scaling"
-	ClusterConditionUpgrading                       = "Upgrading"
+	ClusterConditionAvailable ClusterConditionType = "Available"
+	ClusterConditionScaling                        = "Scaling"
+	ClusterConditionUpgrading                      = "Upgrading"
+
+	ClusterNameLabel = "etcd.imliuda.github.io/cluster"
+	AppNameLabel     = "app.kubernetes.io/name"
+	AppVersionLabel  = "app.kubernetes.io/version"
+
+	ClusterMembersAnnotation      = "etcd.imliuda.github.io/members"
+	ClusterUpgradeAnnotation      = "etcd.imliuda.github.io/upgrade"
+	ClusterBootStrappedAnnotation = "etcd.imliuda.github.io/bootstrapped"
 )
 
 // EtcdClusterSpec defines the desired state of EtcdCluster
 type EtcdClusterSpec struct {
-	// Size is the expected size of the etcd cluster.
+	// Replicas is the expected size of the etcd cluster.
 	// The etcd-operator will eventually make the size of the running
 	// cluster equal to the expected size.
 	// The vaild range of the size is from 1 to 7.
 	// +kubebuilder:default=3
-	Size int `json:"size"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=7
+	Replicas int `json:"replicas"`
 	// Repository is the name of the repository that hosts
 	// etcd container images. It should be direct clone of the repository in official
 	// release:
@@ -132,7 +141,7 @@ type PodPolicy struct {
 	// bad environement variables are provided. Do not overwrite any flags used to
 	// bootstrap the cluster (for example `--initial-cluster` flag).
 	// This field cannot be updated.
-	EtcdEnv []v1.EnvVar `json:"etcdEnv,omitempty"`
+	Envs []v1.EnvVar `json:"etcdEnv,omitempty"`
 
 	// PersistentVolumeClaimSpec is the spec to describe PVC for the etcd container
 	// This field is optional. If no PVC spec, etcd container will use emptyDir as volume
@@ -196,19 +205,19 @@ type MembersStatus struct {
 // EtcdClusterStatus defines the observed state of EtcdCluster
 type EtcdClusterStatus struct {
 	// Phase is the cluster running phase
-	// +kubebuilder:default=false
-	Ready bool `json:"phase,omitempty"`
+	// +kubebuilder:validation:Enum="";Creating;Running;Failed
+	Phase ClusterPhase `json:"phase,omitempty"`
 
-	// ControlPuased indicates the operator pauses the control of the cluster.
+	// ControlPaused indicates the operator pauses the control of the cluster.
 	// +kubebuilder:default=false
 	ControlPaused bool `json:"controlPaused,omitempty"`
 
 	// Condition keeps track of all cluster conditions, if they exist.
 	Conditions []ClusterCondition `json:"conditions,omitempty"`
 
-	// Size is the current size of the cluster
+	// Replicas is the current size of the cluster
 	// +kubebuilder:default=0
-	Size int `json:"size,omitempty"`
+	Replicas int `json:"replicas,omitempty"`
 
 	// ServiceName is the LB service for accessing etcd nodes.
 	ServiceName string `json:"serviceName,omitempty"`
@@ -230,10 +239,12 @@ type EtcdClusterStatus struct {
 
 // https://medium.com/@thescott111/autoscaling-kubernetes-custom-resource-using-the-hpa-957d00bb7993
 // https://kubernetes.io/zh/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/
+// https://kubernetes.io/docs/concepts/workloads/pods/disruptions/
+// https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.size,statuspath=.status.size,selectorpath=.status.labelSelector
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.labelSelector
 
 // EtcdCluster is the Schema for the etcdclusters API
 type EtcdCluster struct {

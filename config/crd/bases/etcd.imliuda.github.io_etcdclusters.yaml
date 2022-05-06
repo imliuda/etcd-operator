@@ -1490,6 +1490,13 @@ spec:
                       type: object
                     type: array
                 type: object
+              replicas:
+                default: 3
+                description: Replicas is the expected size of the etcd cluster. The
+                  etcd-operator will eventually make the size of the running cluster
+                  equal to the expected size. The vaild range of the size is from
+                  1 to 7.
+                type: integer
               repository:
                 default: quay.io/coreos/etcd
                 description: "Repository is the name of the repository that hosts
@@ -1498,12 +1505,6 @@ spec:
                   means, it should have exact same tags and the same meaning for the
                   tags. \n By default, it is `quay.io/coreos/etcd`."
                 type: string
-              size:
-                default: 3
-                description: Size is the expected size of the etcd cluster. The etcd-operator
-                  will eventually make the size of the running cluster equal to the
-                  expected size. The vaild range of the size is from 1 to 7.
-                type: integer
               version:
                 default: 3.2.13
                 description: "Version is the expected version of the etcd cluster.
@@ -1514,7 +1515,7 @@ spec:
                   \n If version is not set, default is \"3.2.13\"."
                 type: string
             required:
-            - size
+            - replicas
             type: object
           status:
             description: EtcdClusterStatus defines the observed state of EtcdCluster
@@ -1586,16 +1587,20 @@ spec:
                     type: array
                 type: object
               phase:
-                default: false
                 description: Phase is the cluster running phase
-                type: boolean
+                enum:
+                - ""
+                - Creating
+                - Running
+                - Failed
+                type: string
+              replicas:
+                default: 0
+                description: Replicas is the current size of the cluster
+                type: integer
               serviceName:
                 description: ServiceName is the LB service for accessing etcd nodes.
                 type: string
-              size:
-                default: 0
-                description: Size is the current size of the cluster
-                type: integer
               targetVersion:
                 description: TargetVersion is the version the cluster upgrading to.
                   If the cluster is not upgrading, TargetVersion is empty.
@@ -1607,8 +1612,8 @@ spec:
     subresources:
       scale:
         labelSelectorPath: .status.labelSelector
-        specReplicasPath: .spec.size
-        statusReplicasPath: .status.size
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
       status: {}
 status:
   acceptedNames:

@@ -21,7 +21,9 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"strings"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -49,10 +51,12 @@ type EtcdClusterReconciler struct {
 //+kubebuilder:rbac:groups=etcd.imliuda.github.io,resources=etcdclusters,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=etcd.imliuda.github.io,resources=etcdclusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=etcd.imliuda.github.io,resources=etcdclusters/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;create;delete;list;watch
+//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;create;delete;list;watch
+//+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;create;delete;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
 // the EtcdCluster object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
@@ -64,21 +68,19 @@ type EtcdClusterReconciler struct {
 // https://maelvls.dev/kubernetes-conditions/
 // https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
 // Every time we enter reconcile, we use the latest Object
+//
+// Original etcd-operator use a background go routine for each cluster, by selecting channel do sync works.
+//
+// Controller's work queue will ensure there is only one worker for a key
 func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger.Info("Reconcile start")
-	defer logger.Info("Reconcile end")
+	logger.V(10).Info("Reconcile start")
+	defer logger.V(10).Info("Reconcile end")
 
 	// Ignore delete objects
 	cluster := &etcdv1alpha1.EtcdCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	// Controller's work queue will ensure there is only one worker for a key
-	// if _, loaded := r.locks.LoadOrStore(req.NamespacedName, true); loaded {
-	// 	return ctrl.Result{Requeue: true}, nil
-	// }
-	// defer r.locks.Delete(req.NamespacedName)
 
 	desired := cluster.DeepCopy()
 
@@ -124,16 +126,46 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// 1. Ensure services
+	// 1. First time we see the cluster, initialize it
+	if cluster.Status.Phase == etcdv1alpha1.ClusterPhaseNone {
+		desired.Status.Phase = etcdv1alpha1.ClusterPhaseCreating
+		err := r.Client.Status().Patch(ctx, desired, client.MergeFrom(cluster))
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, err
+	}
+
+	// 2. If cluster has desired members, Default to ""
+	if cluster.Annotations[etcdv1alpha1.ClusterMembersAnnotation] == "" {
+		ms := r.specMemberSet(cluster)
+		desired.Annotations[etcdv1alpha1.ClusterMembersAnnotation] = strings.Join(ms.Names(), ",")
+		err := r.Client.Patch(ctx, desired, client.MergeFrom(cluster))
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, err
+	}
+
+	// 3. Ensure services
 	logger.Info("Ensuring cluster services", "cluster", cluster.Name)
 	if err := r.ensureService(ctx, cluster); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 2. Ensure pods
-	logger.Info("Ensuring cluster pods", "cluster", cluster.Name)
-	if err := r.ensurePods(ctx, cluster); err != nil {
-		return ctrl.Result{}, err
+	// 4. Ensure bootstrapped, we will block here util cluster is up and healthy
+	// sigs.k8s.io/controller-runtime/pkg/internal/controller/controller.go
+	logger.Info("Ensuring cluster members", "cluster", cluster.Name)
+	//if cluster.Status.Phase == etcdv1alpha1.ClusterPhaseCreating {
+	if requeue, err := r.ensureMembers(ctx, cluster); requeue {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
+	//}
+
+	// 5. Ensure cluster scaled
+	logger.Info("Ensuring cluster scaled", "cluster", cluster.Name)
+	if requeue, err := r.ensureScaled(ctx, cluster); requeue {
+		return ctrl.Result{Requeue: true}, err
+	}
+
+	// 6. Ensure cluster upgraded
+	logger.Info("Ensuring cluster upgraded", "cluster", cluster.Name)
+	if requeue, err := r.ensureUpgraded(ctx, cluster); requeue {
+		return ctrl.Result{Requeue: true}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -156,15 +188,15 @@ func (r *ClusterFilter) Update(evt event.UpdateEvent) bool {
 		newC := evt.ObjectNew.(*etcdv1alpha1.EtcdCluster)
 
 		logger.V(5).Info("Running update filter",
-			"Old size", oldC.Spec.Size,
-			"New size", newC.Spec.Size,
+			"Old size", oldC.Spec.Replicas,
+			"New size", newC.Spec.Replicas,
 			"old paused", oldC.Spec.Paused,
 			"new paused", newC.Spec.Paused,
 			"old object deletion", !oldC.ObjectMeta.DeletionTimestamp.IsZero(),
 			"new object deletion", !newC.ObjectMeta.DeletionTimestamp.IsZero())
 
 		// Only care about size, version and paused fields
-		if oldC.Spec.Size != newC.Spec.Size {
+		if oldC.Spec.Replicas != newC.Spec.Replicas {
 			return true
 		}
 
@@ -183,12 +215,12 @@ func (r *ClusterFilter) Update(evt event.UpdateEvent) bool {
 				return true
 			}
 		}
-	case *v1.Pod:
-		oldP := evt.ObjectOld.(*v1.Pod)
-		newP := evt.ObjectNew.(*v1.Pod)
-		if oldP.DeletionTimestamp.IsZero() && !newP.DeletionTimestamp.IsZero() {
-			return true
-		}
+	//case *v1.Pod:
+	//	oldP := evt.ObjectOld.(*v1.Pod)
+	//	newP := evt.ObjectNew.(*v1.Pod)
+	//	if oldP.DeletionTimestamp.IsZero() && !newP.DeletionTimestamp.IsZero() {
+	//		return true
+	//	}
 	}
 	return false
 }
@@ -197,8 +229,8 @@ func (r *ClusterFilter) Delete(evt event.DeleteEvent) bool {
 	switch evt.Object.(type) {
 	case *etcdv1alpha1.EtcdCluster:
 		return true
-	//case *v1.Pod:
-	//	return true
+	case *v1.Pod:
+		return true
 	case *v1.Service:
 		return true
 	}
@@ -206,7 +238,7 @@ func (r *ClusterFilter) Delete(evt event.DeleteEvent) bool {
 }
 
 func (r *ClusterFilter) Generic(evt event.GenericEvent) bool {
-	return false
+	return true
 }
 
 // SetupWithManager sets up the controller with the Manager.

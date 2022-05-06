@@ -40,6 +40,7 @@ type Member struct {
 	// ClusterDomain is the DNS name of the cluster. E.g. .cluster.local.
 	ClusterDomain string
 
+	Created         bool
 	RunningAndReady bool
 	Version         string
 }
@@ -76,6 +77,12 @@ func (m *Member) ListenPeerURL() string {
 
 func (m *Member) PeerURL() string {
 	return fmt.Sprintf("%s://%s:2380", m.peerScheme(), m.Addr())
+}
+
+func (m Member) Ordinal() int {
+	idx := strings.LastIndex(m.Name, "-")
+	id, _ := strconv.ParseInt(m.Name[idx+1:], 10, 32)
+	return int(id)
 }
 
 type MemberSet map[string]*Member
@@ -171,11 +178,25 @@ func (ms MemberSet) ClientURLs() []string {
 func (ms MemberSet) Ordinals() map[int]bool {
 	ids := map[int]bool{}
 	for _, m := range ms {
-		idx := strings.LastIndex(m.Name, "-")
-		id, _ := strconv.ParseInt(m.Name[idx+1:], 10, 32)
-		ids[int(id)] = true
+		ids[m.Ordinal()] = true
 	}
 	return ids
+}
+
+func (ms MemberSet) Names() []string {
+	names := make([]string, 0)
+	for _, m := range ms {
+		names = append(names, m.Name)
+	}
+	return names
+}
+
+func (ms MemberSet) Duplicate() MemberSet {
+	r := MemberSet{}
+	for k, v := range ms {
+		r[k] = v
+	}
+	return r
 }
 
 var validPeerURL = regexp.MustCompile(`^\w+:\/\/[\w\.\-]+(:\d+)?$`)

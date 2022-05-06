@@ -21,27 +21,19 @@ import (
 	etcdv1alpha1 "github.com/imliuda/etcd-operator/apis/etcd/v1alpha1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"strings"
 )
 
 const (
-	ClusterNodeId            = "etcd.imliuda.github.io/node-id"
-	PodLabel                 = "etcd.imliuda.github.io/cluster"
-	etcdVolumeName           = "etcd-data"
-	etcdVolumeMountDir       = "/var/etcd"
-	dataDir                  = etcdVolumeMountDir + "/data"
-	etcdVersionAnnotationKey = "etcd.version"
-	peerTLSDir               = "/etc/etcdtls/member/peer-tls"
-	peerTLSVolume            = "member-peer-tls"
-	serverTLSDir             = "/etc/etcdtls/member/server-tls"
-	serverTLSVolume          = "member-server-tls"
-	operatorEtcdTLSDir       = "/etc/etcdtls/operator/etcd-tls"
-	operatorEtcdTLSVolume    = "etcd-client-tls"
-
-	randomSuffixLength = 10
-	// k8s object name has a maximum length
-	MaxNameLength = 63 - randomSuffixLength - 1
+	etcdVolumeName                = "etcd-data"
+	etcdVolumeMountDir            = "/var/etcd"
+	dataDir                       = etcdVolumeMountDir + "/data"
+	peerTLSDir                    = "/etc/etcdtls/member/peer-tls"
+	peerTLSVolume                 = "member-peer-tls"
+	serverTLSDir                  = "/etc/etcdtls/member/server-tls"
+	serverTLSVolume               = "member-server-tls"
+	operatorEtcdTLSDir            = "/etc/etcdtls/operator/etcd-tls"
+	operatorEtcdTLSVolume         = "etcd-client-tls"
 
 	// defaultDNSTimeout is the default maximum allowed time for the init container of the etcd pod
 	// to reverse DNS lookup its IP. The default behavior is to wait forever and has a value of 0.
@@ -55,11 +47,11 @@ const (
 )
 
 func GetEtcdVersion(pod *v1.Pod) string {
-	return pod.Annotations[etcdVersionAnnotationKey]
+	return pod.Labels[etcdv1alpha1.AppVersionLabel]
 }
 
 func SetEtcdVersion(pod *v1.Pod, version string) {
-	pod.Annotations[etcdVersionAnnotationKey] = version
+	pod.Labels[etcdv1alpha1.AppVersionLabel] = version
 }
 
 func GetPodNames(pods []*v1.Pod) []string {
@@ -89,17 +81,9 @@ func PodWithNodeSelector(p *v1.Pod, ns map[string]string) *v1.Pod {
 
 func LabelsForCluster(cluster *etcdv1alpha1.EtcdCluster) map[string]string {
 	return map[string]string{
-		PodLabel: cluster.Name,
-		"app":    "etcd",
+		etcdv1alpha1.ClusterNameLabel: cluster.Name,
+		etcdv1alpha1.AppNameLabel:    "etcd",
 	}
-}
-
-func UniqueMemberName(clusterName string) string {
-	suffix := utilrand.String(randomSuffixLength)
-	if len(clusterName) > MaxNameLength {
-		clusterName = clusterName[:MaxNameLength]
-	}
-	return clusterName + "-" + suffix
 }
 
 // AddEtcdVolumeToPod abstract the process of appending volume spec to pod spec
@@ -115,8 +99,8 @@ func AddEtcdVolumeToPod(pod *v1.Pod, pvc *v1.PersistentVolumeClaim) {
 	pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
 }
 
-func NewEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, state string) *v1.Pod {
-	pod := newEtcdPod(cluster, m, state)
+func NewEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []string, state string) *v1.Pod {
+	pod := newEtcdPod(cluster, m, initialCluster, state)
 	applyPodPolicy(pod, cluster.Spec.Pod)
 	return pod
 }
@@ -134,15 +118,11 @@ func NewEtcdPodPVC(cluster *etcdv1alpha1.EtcdCluster, m *Member) *v1.PersistentV
 	return pvc
 }
 
-func newEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, state string) *v1.Pod {
-	discoverySrv := fmt.Sprintf("%s.%s.svc", PeerServiceName(cluster), cluster.Namespace)
-	if m.ClusterDomain != "" {
-		discoverySrv = fmt.Sprintf("%s.%s", discoverySrv, m.ClusterDomain)
-	}
+func newEtcdPod(cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []string, state string) *v1.Pod {
 	commands := fmt.Sprintf("/usr/local/bin/etcd --data-dir=%s --name=%s --initial-advertise-peer-urls=%s "+
 		"--listen-peer-urls=%s --listen-client-urls=%s --advertise-client-urls=%s "+
-		"--discovery-srv=%s --initial-cluster-state=%s",
-		dataDir, m.Name, m.PeerURL(), m.ListenPeerURL(), m.ListenClientURL(), m.ClientURL(), discoverySrv, state)
+		"--initial-cluster=%s --initial-cluster-state=%s",
+		dataDir, m.Name, m.PeerURL(), m.ListenPeerURL(), m.ListenClientURL(), m.ClientURL(), strings.Join(initialCluster, ","), state)
 	if m.SecurePeer {
 		commands += fmt.Sprintf(" --peer-client-cert-auth=true --peer-trusted-ca-file=%[1]s/peer-ca.crt --peer-cert-file=%[1]s/peer.crt --peer-key-file=%[1]s/peer.key", peerTLSDir)
 	}
@@ -287,7 +267,7 @@ func applyPodPolicy(pod *v1.Pod, policy *etcdv1alpha1.PodPolicy) {
 	for i := range pod.Spec.Containers {
 		pod.Spec.Containers[i] = containerWithRequirements(pod.Spec.Containers[i], policy.Resources)
 		if pod.Spec.Containers[i].Name == "etcd" {
-			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, policy.EtcdEnv...)
+			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, policy.Envs...)
 		}
 	}
 
