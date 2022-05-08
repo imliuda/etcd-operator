@@ -21,26 +21,35 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type ClusterPhase string
-type ClusterConditionType string
+type ConditionType string
 
 const (
-	ClusterPhaseNone     ClusterPhase = ""
-	ClusterPhaseCreating              = "Creating"
-	ClusterPhaseRunning               = "Running"
-	ClusterPhaseFailed                = "Failed"
+	EtcdClusterResourceKind = "EtcdCluster"
 
-	ClusterConditionAvailable ClusterConditionType = "Available"
-	ClusterConditionScaling                        = "Scaling"
-	ClusterConditionUpgrading                      = "Upgrading"
+	ConditionAvailable ConditionType = "Available"
+	ConditionProgressing             = "Progressing"
+	ConditionFailed                  = "Failed"
 
-	ClusterNameLabel = "etcd.imliuda.github.io/cluster"
-	AppNameLabel     = "app.kubernetes.io/name"
-	AppVersionLabel  = "app.kubernetes.io/version"
+	// For Available
+	ReasonBootStrapping = "BootStrapping"
+	ReasonBootStrapped  = "BootStrapped"
+	ReasonScaled        = "Scaled"
+	ReasonUpgraded      = "Upgraded"
+	ReasonResync        = "Resync"
 
-	ClusterMembersAnnotation      = "etcd.imliuda.github.io/members"
-	ClusterUpgradeAnnotation      = "etcd.imliuda.github.io/upgrade"
-	ClusterBootStrappedAnnotation = "etcd.imliuda.github.io/bootstrapped"
+	// For Progressing
+	ReasonBoot      = "BootStrap"
+	ReasonUpgrade   = "Upgrade"
+	ReasonScaleUP   = "ScaleUp"
+	ReasonScaleDown = "ScaleDown"
+
+	ClusterLabel    = "etcd.imliuda.github.io/cluster"
+	AppNameLabel    = "app.kubernetes.io/name"
+	AppVersionLabel = "app.kubernetes.io/version"
+
+	MembersAnnotation      = "etcd.imliuda.github.io/members"
+	UpgradeAnnotation      = "etcd.imliuda.github.io/upgrade"
+	BootStrappedAnnotation = "etcd.imliuda.github.io/bootstrapped"
 )
 
 // EtcdClusterSpec defines the desired state of EtcdCluster
@@ -181,7 +190,7 @@ type PodPolicy struct {
 // the Upgrading condition's status will would be False and communicate the problem back.
 type ClusterCondition struct {
 	// Type of cluster condition.
-	Type ClusterConditionType `json:"type"`
+	Type ConditionType `json:"type"`
 	// Status of the condition, one of True, False, Unknown.
 	Status v1.ConditionStatus `json:"status"`
 	// The last time this condition was updated.
@@ -204,15 +213,13 @@ type MembersStatus struct {
 
 // EtcdClusterStatus defines the observed state of EtcdCluster
 type EtcdClusterStatus struct {
-	// Phase is the cluster running phase
-	// +kubebuilder:validation:Enum="";Creating;Running;Failed
-	Phase ClusterPhase `json:"phase,omitempty"`
-
 	// ControlPaused indicates the operator pauses the control of the cluster.
 	// +kubebuilder:default=false
 	ControlPaused bool `json:"controlPaused,omitempty"`
 
 	// Condition keeps track of all cluster conditions, if they exist.
+	// See https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md
+	// https://maelvls.dev/kubernetes-conditions/
 	Conditions []ClusterCondition `json:"conditions,omitempty"`
 
 	// Replicas is the current size of the cluster
@@ -228,11 +235,7 @@ type EtcdClusterStatus struct {
 
 	// Members are the etcd members in the cluster
 	Members MembersStatus `json:"members,omitempty"`
-	// CurrentVersion is the current cluster version
-	CurrentVersion string `json:"currentVersion,omitempty"`
-	// TargetVersion is the version the cluster upgrading to.
-	// If the cluster is not upgrading, TargetVersion is empty.
-	TargetVersion string `json:"targetVersion,omitempty"`
+
 	// LabelSelector is for hpa
 	LabelSelector string `json:"labelSelector,omitempty"`
 }

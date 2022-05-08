@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 	"strings"
 	"sync"
@@ -79,6 +80,8 @@ type EtcdClusterReconciler struct {
 //
 // Controller's work queue will ensure there is only one worker for a key
 func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger = log.FromContext(ctx)
+
 	logger.V(10).Info("Reconcile start")
 	defer logger.V(10).Info("Reconcile end")
 
@@ -98,7 +101,7 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// registering our finalizer.
 		if !controllerutil.ContainsFinalizer(desired, FinalizerName) {
 			controllerutil.AddFinalizer(desired, FinalizerName)
-			if err := r.Update(ctx, desired); err != nil {
+			if err := r.Client.Update(ctx, desired); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -114,7 +117,7 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 			// remove our finalizer from the list and update it.
 			controllerutil.RemoveFinalizer(desired, FinalizerName)
-			if err := r.Update(ctx, desired); err != nil {
+			if err := r.Client.Update(ctx, desired); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -133,49 +136,42 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := r.Status().Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	// 1. First time we see the cluster, initialize it
-	if cluster.Status.Phase == etcdv1alpha1.ClusterPhaseNone {
-		desired.Status.Phase = etcdv1alpha1.ClusterPhaseCreating
-		err := r.Client.Status().Patch(ctx, desired, client.MergeFrom(cluster))
-		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, err
-	}
-
-	// 2. If cluster has desired members, Default to ""
-	if cluster.Annotations[etcdv1alpha1.ClusterMembersAnnotation] == "" {
+	// 1. If cluster has desired members, Default to ""
+	if cluster.Annotations[etcdv1alpha1.MembersAnnotation] == "" {
 		ms := r.specMemberSet(cluster)
-		desired.Annotations[etcdv1alpha1.ClusterMembersAnnotation] = strings.Join(ms.Names(), ",")
+		desired.Annotations[etcdv1alpha1.MembersAnnotation] = strings.Join(ms.Names(), ",")
+		desired.Status.SetProgressingCondition(etcdv1alpha1.ReasonBoot, "Cluster creating")
+		desired.Status.SetAvailableCondition(v1.ConditionFalse, etcdv1alpha1.ReasonBootStrapping,"Cluster creating")
 		err := r.Client.Patch(ctx, desired, client.MergeFrom(cluster))
 		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, err
 	}
 
-	// 3. Ensure services
+	// 2. Ensure services
 	logger.Info("Ensuring cluster services", "cluster", cluster.Name)
 	if err := r.ensureService(ctx, cluster); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 4. Ensure bootstrapped, we will block here util cluster is up and healthy
+	// 3. Ensure bootstrapped, we will block here util cluster is up and healthy
 	// sigs.k8s.io/controller-runtime/pkg/internal/controller/controller.go
 	logger.Info("Ensuring cluster members", "cluster", cluster.Name)
-	//if cluster.Status.Phase == etcdv1alpha1.ClusterPhaseCreating {
 	if requeue, err := r.ensureMembers(ctx, cluster); requeue {
 		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
-	//}
 
-	// 5. Ensure cluster scaled
+	// 4. Ensure cluster scaled
 	logger.Info("Ensuring cluster scaled", "cluster", cluster.Name)
 	if requeue, err := r.ensureScaled(ctx, cluster); requeue {
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
 
-	// 6. Ensure cluster upgraded
+	// 5. Ensure cluster upgraded
 	logger.Info("Ensuring cluster upgraded", "cluster", cluster.Name)
 	if requeue, err := r.ensureUpgraded(ctx, cluster); requeue {
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
 
 	return ctrl.Result{}, nil

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/coreos/etcd/clientv3"
 	etcdv1alpha1 "github.com/imliuda/etcd-operator/apis/etcd/v1alpha1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -130,7 +129,7 @@ func (r *EtcdClusterReconciler) configMemberSet(ctx context.Context, cluster *et
 	members := MemberSet{}
 
 	// Normally will not happen
-	ms, ok := cluster.Annotations[etcdv1alpha1.ClusterMembersAnnotation]
+	ms, ok := cluster.Annotations[etcdv1alpha1.MembersAnnotation]
 	if !ok || ms == "" {
 		return members, errors.New("cluster spec has no members annotation")
 	}
@@ -220,7 +219,7 @@ func (r *EtcdClusterReconciler) ensureMembers(ctx context.Context, cluster *etcd
 	logger.V(10).Info("Existing pod members", "members", pms)
 
 	// Pods may be not created, or partial created, ensure all config member pods are created
-	_, bootstrapped := cluster.Annotations[etcdv1alpha1.ClusterBootStrappedAnnotation]
+	_, bootstrapped := cluster.Annotations[etcdv1alpha1.BootStrappedAnnotation]
 
 	state := "new"
 	if bootstrapped {
@@ -268,9 +267,10 @@ func (r *EtcdClusterReconciler) ensureMembers(ctx context.Context, cluster *etcd
 
 	desired := cluster.DeepCopy()
 	if !bootstrapped {
-		desired.Annotations[etcdv1alpha1.ClusterBootStrappedAnnotation] = "true"
+		desired.Annotations[etcdv1alpha1.BootStrappedAnnotation] = "true"
 	}
-	desired.Status.Phase = etcdv1alpha1.ClusterPhaseRunning
+	desired.Status.SetAvailableCondition(v1.ConditionTrue, etcdv1alpha1.ReasonBootStrapped, "Cluster created")
+	desired.Status.RemoveProgressingCondition()
 	if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 		return true, err
 	}
@@ -291,12 +291,21 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 
 	ids := ms.Ordinals()
 
-	// Scale up
+	// Scale up one by one
 	if len(ids) < cluster.Spec.Replicas {
+		desired := cluster.DeepCopy()
+
+		desired.Status.SetProgressingCondition(etcdv1alpha1.ReasonScaleUP,
+			fmt.Sprintf("From %d to %d", len(ids), cluster.Spec.Replicas))
+		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
+			return true, err
+		}
+
 		m := r.newMember(cluster, len(ids) + 1)
 		// Ensure pod created
 		newms := ms.Duplicate()
 		newms.Add(m)
+
 		if err = r.createMember(ctx, cluster, m, newms.PeerURLPairs(), "existing"); err != nil {
 			return true, err
 		}
@@ -314,8 +323,7 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 			return true, nil
 		}
 
-		desired := cluster.DeepCopy()
-		desired.Annotations[etcdv1alpha1.ClusterMembersAnnotation] += "," + m.Name
+		desired.Annotations[etcdv1alpha1.MembersAnnotation] += "," + m.Name
 		err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster))
 
 		// Cluster modified, next reconcile will enter r.ensureMembers()
@@ -324,11 +332,19 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 
 	// Scale down
 	if len(ids) > cluster.Spec.Replicas {
+		desired := cluster.DeepCopy()
+
+		desired.Status.SetProgressingCondition(etcdv1alpha1.ReasonScaleDown,
+			fmt.Sprintf("From %d to %d", len(ids), cluster.Spec.Replicas))
+		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
+			return true, err
+		}
+
 		m := r.newMember(cluster, len(ids))
 		if err = r.removeMember(ctx, cluster, ms, m); err != nil {
 			return true, err
 		}
-		//ms.Remove(m.Name)
+
 		exists, err := r.memberExists(ctx, cluster, ms, m)
 		if err != nil {
 			return true, nil
@@ -336,42 +352,21 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 		if exists {
 			return true, nil
 		}
+
+		desired.Annotations[etcdv1alpha1.MembersAnnotation] = strings.Join(ms.Names(), ",")
+		err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster))
+		return true, err
+	}
+
+	if cluster.Status.GetCondition(etcdv1alpha1.ConditionProgressing) != nil {
 		desired := cluster.DeepCopy()
-		desired.Annotations[etcdv1alpha1.ClusterMembersAnnotation] = strings.Join(ms.Names(), ",")
+		desired.Status.RemoveProgressingCondition()
 		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 			return true, err
 		}
 	}
 
 	return false, nil
-}
-
-func (r *EtcdClusterReconciler) getEtcdClient(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster, members MemberSet) (*clientv3.Client, error) {
-	// etcdctl member add
-	var err error
-	cfg := clientv3.Config{
-		Endpoints:   members.ClientURLs(),
-		DialTimeout: DefaultDialTimeout,
-	}
-
-	if cluster.Spec.TLS.IsSecureClient() {
-		secret := &v1.Secret{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: cluster.Name, Name: cluster.Spec.TLS.Static.OperatorSecret}, secret); err != nil {
-			return nil, err
-		}
-		cfg.TLS, err = NewTLSConfig(secret.Data[CliCertFile], secret.Data[CliKeyFile], secret.Data[CliCAFile])
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	logger.V(5).Info("Etcd client config", "config", cfg)
-
-	etcdcli, err := clientv3.New(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return etcdcli, nil
 }
 
 func (r *EtcdClusterReconciler) createMember(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster, m *Member, initialCluster []string, state string) error {
@@ -386,39 +381,6 @@ func (r *EtcdClusterReconciler) createMember(ctx context.Context, cluster *etcdv
 
 	// Create pod
 	if err = r.Client.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-
-	return nil
-}
-
-func (r *EtcdClusterReconciler) addMember(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster, ms MemberSet, m *Member) error {
-	logger.Info("Starting add new member to cluster", "cluster", cluster.Name)
-	defer logger.Info("End add new member to cluster", "cluster", cluster.Name)
-
-	cli, err := r.getEtcdClient(ctx, cluster, ms)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-
-	etcdctx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
-	defer cancel()
-
-	// Get existing members
-	list, err := cli.MemberList(etcdctx)
-	if err != nil {
-		return err
-	}
-
-	// Already exists
-	for _, e := range list.Members {
-		if e.Name == m.Name {
-			return nil
-		}
-	}
-
-	if _, err = cli.MemberAdd(etcdctx, []string{m.PeerURL()}); err != nil {
 		return err
 	}
 
@@ -446,60 +408,6 @@ func (r *EtcdClusterReconciler) deleteMember(ctx context.Context, cluster *etcdv
 	return nil
 }
 
-// Check error first
-func (r *EtcdClusterReconciler) memberExists(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster, ms MemberSet, m *Member) (bool, error) {
-	cli, err := r.getEtcdClient(ctx, cluster, ms)
-	if err != nil {
-		return false, err
-	}
-	defer cli.Close()
-
-	etcdctx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
-	defer cancel()
-
-	// Get existing members
-	list, err := cli.MemberList(etcdctx)
-	if err != nil {
-		return false, err
-	}
-
-	for _, e := range list.Members {
-		if e.Name == m.Name {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-func (r *EtcdClusterReconciler) removeMember(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster, ms MemberSet, m *Member) error {
-	cli, err := r.getEtcdClient(ctx, cluster, ms)
-	if err != nil {
-		return err
-	}
-	defer cli.Close()
-
-	etcdctx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
-	defer cancel()
-
-	// Get existing members
-	list, err := cli.MemberList(etcdctx)
-	if err != nil {
-		return err
-	}
-
-	// Remove
-	for _, e := range list.Members {
-		if e.Name == m.Name {
-			if _, err = cli.MemberRemove(etcdctx, e.ID); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
 func (r *EtcdClusterReconciler) ensureUpgraded(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (bool, error) {
 	ms, err := r.configMemberSet(ctx, cluster)
 	if err != nil {
@@ -514,7 +422,7 @@ func (r *EtcdClusterReconciler) ensureUpgraded(ctx context.Context, cluster *etc
 	// When using cached objects, we may delete many pods, watch has latency.
 	// So using cluster object as a queue, annotate pods to be upgraded first,
 	// then check annotation and delete appropriate pods.
-	toUpgrade := cluster.Annotations[etcdv1alpha1.ClusterUpgradeAnnotation]
+	toUpgrade := cluster.Annotations[etcdv1alpha1.UpgradeAnnotation]
 	logger.V(9).Info("toUpgrade", "toUpgrade", toUpgrade)
 	if toUpgrade == "" {
 		// Pick one pod or more pods, but best not the header ones
@@ -522,7 +430,7 @@ func (r *EtcdClusterReconciler) ensureUpgraded(ctx context.Context, cluster *etc
 		for _, m := range ms {
 			if m.Version != cluster.Spec.Version {
 				desired := cluster.DeepCopy()
-				desired.Annotations[etcdv1alpha1.ClusterUpgradeAnnotation] = m.Name
+				desired.Annotations[etcdv1alpha1.UpgradeAnnotation] = m.Name
 				if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 					return true, err
 				}
@@ -545,7 +453,7 @@ func (r *EtcdClusterReconciler) ensureUpgraded(ctx context.Context, cluster *etc
 			return true, nil
 		}
 		desired := cluster.DeepCopy()
-		delete(desired.Annotations, etcdv1alpha1.ClusterUpgradeAnnotation)
+		delete(desired.Annotations, etcdv1alpha1.UpgradeAnnotation)
 		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 			return true, err
 		}

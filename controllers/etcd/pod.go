@@ -81,8 +81,8 @@ func PodWithNodeSelector(p *v1.Pod, ns map[string]string) *v1.Pod {
 
 func LabelsForCluster(cluster *etcdv1alpha1.EtcdCluster) map[string]string {
 	return map[string]string{
-		etcdv1alpha1.ClusterNameLabel: cluster.Name,
-		etcdv1alpha1.AppNameLabel:    "etcd",
+		etcdv1alpha1.ClusterLabel: cluster.Name,
+		etcdv1alpha1.AppNameLabel: "etcd",
 	}
 }
 
