@@ -21,6 +21,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	"strings"
 	"sync"
 	"time"
@@ -45,7 +47,9 @@ type EtcdClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	locks sync.Map
+	clusters sync.Map
+	resyncCh chan event.GenericEvent
+
 }
 
 //+kubebuilder:rbac:groups=etcd.imliuda.github.io,resources=etcdclusters,verbs=get;list;watch;create;update;patch;delete
@@ -62,7 +66,9 @@ type EtcdClusterReconciler struct {
 // the user.
 //
 // For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.10.0/pkg/reconcile
+// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.10.0/pkg/
+//
+// TODO Standardize logging level and format
 //
 // Not using state machine here:
 // https://maelvls.dev/kubernetes-conditions/
@@ -100,6 +106,8 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// The object is being deleted
 		if controllerutil.ContainsFinalizer(desired, FinalizerName) {
 			// our finalizer is present, so lets handle any external dependency
+			r.clusters.Delete(r.getNamespacedName(cluster))
+
 			if err := r.ensureClusterDeleted(ctx, cluster); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -114,6 +122,8 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// Stop reconciliation as the item is being deleted
 		return ctrl.Result{}, nil
 	}
+
+	r.clusters.Store(r.getNamespacedName(cluster), cluster)
 
 	// If cluster is paused, we do nothing on things changed.
 	// Until cluster is un-paused, we will reconcile to the the state of that point.
@@ -171,9 +181,12 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
-type ClusterFilter struct{}
 
-func (r *ClusterFilter) Create(evt event.CreateEvent) bool {
+type Predicate struct{}
+
+// Create will be trigger when object created or controller restart
+// first time see the object
+func (r *Predicate) Create(evt event.CreateEvent) bool {
 	switch evt.Object.(type) {
 	case *etcdv1alpha1.EtcdCluster:
 		return true
@@ -181,7 +194,7 @@ func (r *ClusterFilter) Create(evt event.CreateEvent) bool {
 	return false
 }
 
-func (r *ClusterFilter) Update(evt event.UpdateEvent) bool {
+func (r *Predicate) Update(evt event.UpdateEvent) bool {
 	switch evt.ObjectNew.(type) {
 	case *etcdv1alpha1.EtcdCluster:
 		oldC := evt.ObjectOld.(*etcdv1alpha1.EtcdCluster)
@@ -215,17 +228,11 @@ func (r *ClusterFilter) Update(evt event.UpdateEvent) bool {
 				return true
 			}
 		}
-	//case *v1.Pod:
-	//	oldP := evt.ObjectOld.(*v1.Pod)
-	//	newP := evt.ObjectNew.(*v1.Pod)
-	//	if oldP.DeletionTimestamp.IsZero() && !newP.DeletionTimestamp.IsZero() {
-	//		return true
-	//	}
 	}
 	return false
 }
 
-func (r *ClusterFilter) Delete(evt event.DeleteEvent) bool {
+func (r *Predicate) Delete(evt event.DeleteEvent) bool {
 	switch evt.Object.(type) {
 	case *etcdv1alpha1.EtcdCluster:
 		return true
@@ -237,17 +244,35 @@ func (r *ClusterFilter) Delete(evt event.DeleteEvent) bool {
 	return false
 }
 
-func (r *ClusterFilter) Generic(evt event.GenericEvent) bool {
-	return true
+func (r *Predicate) Generic(evt event.GenericEvent) bool {
+	switch evt.Object.(type) {
+	case *etcdv1alpha1.EtcdCluster:
+		return true
+	}
+	return false
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *EtcdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	//filter := &ClusterFilter{}
+	r.clusters = sync.Map{}
+	r.resyncCh = make(chan event.GenericEvent)
+
+	filter := &Predicate{}
 	return ctrl.NewControllerManagedBy(mgr).
+		// See sigs.k8s.io/controller-runtime/pkg/predicate/predicate.go
+		// builder.WithPredicates(predicate.AnnotationChangedPredicate{}, predicate.GenerationChangedPredicate{})
+		// or
+		// builder.WithPredicates(predicate.Funcs{
+		//		// If Func is nil, then default is return true
+		//		CreateFunc: func(createEvent event.CreateEvent) bool { return false },
+		//		UpdateFunc: func(updateEvent event.UpdateEvent) bool { return false },
+		//		GenericFunc: func(genericEvent event.GenericEvent) bool { return false },
+		//		DeleteFunc: func(deleteEvent event.DeleteEvent) bool { return true }})
 		For(&etcdv1alpha1.EtcdCluster{}).
 		Owns(&v1.Pod{}).
 		Owns(&v1.Service{}).
-		//WithEventFilter(filter).
+		Watches(&source.Channel{Source: r.resyncCh}, &handler.EnqueueRequestForObject{}).
+		// or use WithEventFilter()
+		WithEventFilter(filter).
 		Complete(r)
 }

@@ -86,14 +86,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&etcdcontrollers.EtcdClusterReconciler{
+	controller := &etcdcontrollers.EtcdClusterReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}
+
+	if err := controller.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EtcdCluster")
 		os.Exit(1)
 	}
-	//+kubebuilder:scaffold:builder
+
+	// See sigs.k8s.io/controller-runtime/pkg/manager/internal.go
+	if err := mgr.Add(controller); err != nil {
+		setupLog.Error(err, "unable to setup controller", "controller", "EtcdCluster")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
