@@ -25,7 +25,7 @@ func (r *EtcdClusterReconciler) Start(ctx context.Context) error {
 				realSleep := rand.Int63nRange(int64(0), int64(period))
 				time.Sleep(time.Duration(realSleep))
 				cluster := value.(*etcdv1alpha1.EtcdCluster)
-				r.resyncCh<- event.GenericEvent{Object: cluster}
+				r.resyncCh <- event.GenericEvent{Object: cluster}
 			}()
 			return true
 		})
@@ -43,4 +43,3 @@ func (r *EtcdClusterReconciler) getNamespacedName(c *etcdv1alpha1.EtcdCluster) s
 func (r *EtcdClusterReconciler) NeedLeaderElection() bool {
 	return true
 }
-

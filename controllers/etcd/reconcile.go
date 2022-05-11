@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"strings"
+	"time"
 )
 
 func (r *EtcdClusterReconciler) ensureService(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) error {
@@ -100,7 +101,7 @@ func (r *EtcdClusterReconciler) newEtcdPod(ctx context.Context, cluster *etcdv1a
 	return pod, nil
 }
 
-func (r *EtcdClusterReconciler) podMemberSet(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (MemberSet, error) {
+func (r *EtcdClusterReconciler) podMembers(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (MemberSet, error) {
 	members := MemberSet{}
 	pods := &v1.PodList{}
 	if err := r.Client.List(ctx, pods, client.InNamespace(cluster.Namespace),
@@ -125,7 +126,7 @@ func (r *EtcdClusterReconciler) podMemberSet(ctx context.Context, cluster *etcdv
 	return members, nil
 }
 
-func (r *EtcdClusterReconciler) configMemberSet(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (MemberSet, error) {
+func (r *EtcdClusterReconciler) currentMembers(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (MemberSet, error) {
 	members := MemberSet{}
 
 	// Normally will not happen
@@ -168,7 +169,7 @@ func (r *EtcdClusterReconciler) configMemberSet(ctx context.Context, cluster *et
 	return members, nil
 }
 
-func (r *EtcdClusterReconciler) specMemberSet(cluster *etcdv1alpha1.EtcdCluster) MemberSet {
+func (r *EtcdClusterReconciler) specMembers(cluster *etcdv1alpha1.EtcdCluster) MemberSet {
 	ms := MemberSet{}
 	for i := 1; i <= cluster.Spec.Replicas; i++ {
 		ms.Add(r.newMember(cluster, i))
@@ -201,18 +202,13 @@ func (r *EtcdClusterReconciler) allMembersHealth(ms MemberSet) bool {
 
 func (r *EtcdClusterReconciler) ensureMembers(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (bool, error) {
 	// Get current pods in this cluster
-	ms, err := r.configMemberSet(ctx, cluster)
+	ms, err := r.currentMembers(ctx, cluster)
 	if err != nil {
 		return true, err
 	}
 	logger.V(10).Info("Expected members", "member set", ms)
 
-	// Stale object
-	//if len(ms) == 0 {
-	//	return true, nil
-	//}
-
-	pms, err := r.podMemberSet(ctx, cluster)
+	pms, err := r.podMembers(ctx, cluster)
 	if err != nil {
 		return true, err
 	}
@@ -268,18 +264,35 @@ func (r *EtcdClusterReconciler) ensureMembers(ctx context.Context, cluster *etcd
 	desired := cluster.DeepCopy()
 	if !bootstrapped {
 		desired.Annotations[etcdv1alpha1.BootStrappedAnnotation] = "true"
+		desired.Status.SetCondition(etcdv1alpha1.ConditionAvailable, v1.ConditionTrue, etcdv1alpha1.ReasonBootStrapped, "Cluster bootstrapped")
+		desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionFalse, etcdv1alpha1.ReasonBootStrapped, "")
 	}
-	desired.Status.SetAvailableCondition(v1.ConditionTrue, etcdv1alpha1.ReasonBootStrapped, "Cluster created")
-	desired.Status.RemoveProgressingCondition()
+
+	condition := desired.Status.GetCondition(etcdv1alpha1.ConditionAvailable)
+	if condition != nil {
+		lastUpdate, err := time.Parse(time.RFC3339, condition.LastUpdateTime)
+		if err != nil {
+			desired.Status.SetCondition(etcdv1alpha1.ConditionAvailable, v1.ConditionTrue, etcdv1alpha1.ReasonResync, "Ensure members")
+		}
+		if time.Now().Sub(lastUpdate) >= time.Second*120 {
+			desired.Status.SetCondition(etcdv1alpha1.ConditionAvailable, v1.ConditionTrue, etcdv1alpha1.ReasonResync, "Ensure members")
+		}
+	}
+
 	if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 		return true, err
 	}
+
+	if !bootstrapped {
+		r.recorder.Event(cluster, v1.EventTypeNormal, etcdv1alpha1.EventClusterBootStrapped, "Cluster bootstrapped")
+	}
+
 	return false, nil
 }
 
 func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (bool, error) {
 	// Get current members in this cluster
-	ms, err := r.configMemberSet(ctx, cluster)
+	ms, err := r.currentMembers(ctx, cluster)
 	if err != nil {
 		return true, err
 	}
@@ -295,16 +308,19 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 	if len(ids) < cluster.Spec.Replicas {
 		desired := cluster.DeepCopy()
 
-		desired.Status.SetProgressingCondition(etcdv1alpha1.ReasonScaleUP,
+		desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionTrue, etcdv1alpha1.ReasonScaleUP,
 			fmt.Sprintf("From %d to %d", len(ids), cluster.Spec.Replicas))
 		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 			return true, err
 		}
 
-		m := r.newMember(cluster, len(ids) + 1)
+		m := r.newMember(cluster, len(ids)+1)
 		// Ensure pod created
 		newms := ms.Duplicate()
 		newms.Add(m)
+
+		r.recorder.Eventf(cluster, v1.EventTypeNormal, etcdv1alpha1.EventMemberAdd,
+			"Adding member with name %s", m.Name)
 
 		if err = r.createMember(ctx, cluster, m, newms.PeerURLPairs(), "existing"); err != nil {
 			return true, err
@@ -326,6 +342,9 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 		desired.Annotations[etcdv1alpha1.MembersAnnotation] += "," + m.Name
 		err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster))
 
+		r.recorder.Eventf(cluster, v1.EventTypeNormal, etcdv1alpha1.EventMemberAdded,
+			"Member with name %s added", m.Name)
+
 		// Cluster modified, next reconcile will enter r.ensureMembers()
 		return true, err
 	}
@@ -334,13 +353,17 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 	if len(ids) > cluster.Spec.Replicas {
 		desired := cluster.DeepCopy()
 
-		desired.Status.SetProgressingCondition(etcdv1alpha1.ReasonScaleDown,
+		desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionTrue, etcdv1alpha1.ReasonScaleDown,
 			fmt.Sprintf("From %d to %d", len(ids), cluster.Spec.Replicas))
 		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 			return true, err
 		}
 
 		m := r.newMember(cluster, len(ids))
+
+		r.recorder.Eventf(cluster, v1.EventTypeNormal, etcdv1alpha1.EventMemberAdd,
+			"Remove member with name %s", m.Name)
+
 		if err = r.removeMember(ctx, cluster, ms, m); err != nil {
 			return true, err
 		}
@@ -355,15 +378,17 @@ func (r *EtcdClusterReconciler) ensureScaled(ctx context.Context, cluster *etcdv
 
 		desired.Annotations[etcdv1alpha1.MembersAnnotation] = strings.Join(ms.Names(), ",")
 		err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster))
+
+		r.recorder.Eventf(cluster, v1.EventTypeNormal, etcdv1alpha1.EventMemberRemoved,
+			"Member with name %s removed", m.Name)
+
 		return true, err
 	}
 
-	if cluster.Status.GetCondition(etcdv1alpha1.ConditionProgressing) != nil {
-		desired := cluster.DeepCopy()
-		desired.Status.RemoveProgressingCondition()
-		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
-			return true, err
-		}
+	desired := cluster.DeepCopy()
+	desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionFalse, etcdv1alpha1.ReasonScaled, "")
+	if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
+		return true, err
 	}
 
 	return false, nil
@@ -409,7 +434,7 @@ func (r *EtcdClusterReconciler) deleteMember(ctx context.Context, cluster *etcdv
 }
 
 func (r *EtcdClusterReconciler) ensureUpgraded(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster) (bool, error) {
-	ms, err := r.configMemberSet(ctx, cluster)
+	ms, err := r.currentMembers(ctx, cluster)
 	if err != nil {
 		return true, err
 	}
@@ -431,9 +456,15 @@ func (r *EtcdClusterReconciler) ensureUpgraded(ctx context.Context, cluster *etc
 			if m.Version != cluster.Spec.Version {
 				desired := cluster.DeepCopy()
 				desired.Annotations[etcdv1alpha1.UpgradeAnnotation] = m.Name
+				desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionTrue, etcdv1alpha1.ReasonUpgrade,
+					fmt.Sprintf("Upgrading member %s from %s to %s", m.Name, m.Version, cluster.Spec.Version))
 				if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 					return true, err
 				}
+
+				r.recorder.Eventf(cluster, v1.EventTypeNormal, etcdv1alpha1.EventMemberUpgraded,
+					"Upgrade member with name %s, current version %s", m.Name, m.Version)
+
 				return true, nil
 			}
 		}
@@ -442,22 +473,36 @@ func (r *EtcdClusterReconciler) ensureUpgraded(ctx context.Context, cluster *etc
 		if err = r.Client.Get(ctx, types.NamespacedName{Name: toUpgrade, Namespace: cluster.Namespace}, pod); err != nil {
 			return true, err
 		}
+
 		logger.V(9).Info("Pod version", "version", GetEtcdVersion(pod), "runningReady", IsRunningAndReady(pod))
+
 		if GetEtcdVersion(pod) != cluster.Spec.Version {
 			// May be staled pod, but we may delete more than one time
 			if err = r.Client.Delete(ctx, pod); err != nil {
 				return true, err
 			}
 		}
+
 		if GetEtcdVersion(pod) != cluster.Spec.Version || !IsRunningAndReady(pod) {
 			return true, nil
 		}
+
 		desired := cluster.DeepCopy()
 		delete(desired.Annotations, etcdv1alpha1.UpgradeAnnotation)
 		if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 			return true, err
 		}
+
+		r.recorder.Eventf(cluster, v1.EventTypeNormal, etcdv1alpha1.EventMemberUpgraded,
+			"Member with name %s upgraded, new version %s", pod.Name, cluster.Spec.Version)
+
 		return true, nil
+	}
+
+	desired := cluster.DeepCopy()
+	desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionFalse, etcdv1alpha1.ReasonUpgraded, "")
+	if err = r.Client.Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
+		return true, err
 	}
 
 	return false, nil

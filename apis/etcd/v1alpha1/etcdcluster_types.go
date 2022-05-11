@@ -26,30 +26,43 @@ type ConditionType string
 const (
 	EtcdClusterResourceKind = "EtcdCluster"
 
-	ConditionAvailable ConditionType = "Available"
-	ConditionProgressing             = "Progressing"
-	ConditionFailed                  = "Failed"
+	ConditionAvailable   ConditionType = "Available"
+	ConditionProgressing               = "Progressing"
+	ConditionFailed                    = "Failed"
 
-	// For Available
+	// For Available condition
 	ReasonBootStrapping = "BootStrapping"
 	ReasonBootStrapped  = "BootStrapped"
 	ReasonScaled        = "Scaled"
 	ReasonUpgraded      = "Upgraded"
 	ReasonResync        = "Resync"
 
-	// For Progressing
+	// For Progressing condition
+	ControlPaused   = "ControlPaused"
 	ReasonBoot      = "BootStrap"
 	ReasonUpgrade   = "Upgrade"
 	ReasonScaleUP   = "ScaleUp"
 	ReasonScaleDown = "ScaleDown"
 
+	// Labels
 	ClusterLabel    = "etcd.imliuda.github.io/cluster"
 	AppNameLabel    = "app.kubernetes.io/name"
 	AppVersionLabel = "app.kubernetes.io/version"
 
+	// Annotations
 	MembersAnnotation      = "etcd.imliuda.github.io/members"
 	UpgradeAnnotation      = "etcd.imliuda.github.io/upgrade"
 	BootStrappedAnnotation = "etcd.imliuda.github.io/bootstrapped"
+
+	EventClusterBootStrapped = "ClusterBootstrapped"
+	EventClusterDeleted      = "ClusterDeleted"
+	EventMemberAdd           = "MemberAdd"
+	EventMemberAdded         = "MemberAdded"
+	EventMemberRemove        = "MemberRemove"
+	EventMemberRemoved       = "MemberRemoved"
+	EventMemberUpgrade       = "MemberUpgrade"
+	EventMemberUpgraded      = "MemberUpgraded"
+	// TODO member health event
 )
 
 // EtcdClusterSpec defines the desired state of EtcdCluster
@@ -213,6 +226,9 @@ type MembersStatus struct {
 
 // EtcdClusterStatus defines the observed state of EtcdCluster
 type EtcdClusterStatus struct {
+	// Phase is the brief state of cluster
+	Phase string `json:"phase,omitempty"`
+
 	// ControlPaused indicates the operator pauses the control of the cluster.
 	// +kubebuilder:default=false
 	ControlPaused bool `json:"controlPaused,omitempty"`

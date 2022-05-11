@@ -85,7 +85,6 @@ func (r *EtcdClusterReconciler) addMember(ctx context.Context, cluster *etcdv1al
 	return nil
 }
 
-
 // Check error first
 func (r *EtcdClusterReconciler) memberExists(ctx context.Context, cluster *etcdv1alpha1.EtcdCluster, ms MemberSet, m *Member) (bool, error) {
 	cli, err := r.getEtcdClient(ctx, cluster, ms)

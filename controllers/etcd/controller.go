@@ -19,6 +19,7 @@ package etcd
 import (
 	"context"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -50,7 +51,7 @@ type EtcdClusterReconciler struct {
 
 	clusters sync.Map
 	resyncCh chan event.GenericEvent
-
+	recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=etcd.imliuda.github.io,resources=etcdclusters,verbs=get;list;watch;create;update;patch;delete
@@ -120,6 +121,8 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if err := r.Client.Update(ctx, desired); err != nil {
 				return ctrl.Result{}, err
 			}
+
+			r.recorder.Eventf(cluster, v1.EventTypeNormal, etcdv1alpha1.EventClusterDeleted, "Cluster deleted")
 		}
 
 		// Stop reconciliation as the item is being deleted
@@ -132,19 +135,24 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Until cluster is un-paused, we will reconcile to the the state of that point.
 	if cluster.Spec.Paused {
 		logger.Info("Cluster control has been paused: ", "cluster-name", cluster.Name)
-		desired.Status.ControlPaused = true
+		condition := desired.Status.GetCondition(etcdv1alpha1.ConditionProgressing)
+		if condition != nil && condition.Reason == etcdv1alpha1.ControlPaused {
+			return ctrl.Result{}, nil
+		}
+
+		desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionFalse, etcdv1alpha1.ControlPaused, "Control paused")
 		if err := r.Status().Patch(ctx, desired, client.MergeFrom(cluster)); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return ctrl.Result{}, nil
 	}
 
 	// 1. If cluster has desired members, Default to ""
 	if cluster.Annotations[etcdv1alpha1.MembersAnnotation] == "" {
-		ms := r.specMemberSet(cluster)
+		ms := r.specMembers(cluster)
 		desired.Annotations[etcdv1alpha1.MembersAnnotation] = strings.Join(ms.Names(), ",")
-		desired.Status.SetProgressingCondition(etcdv1alpha1.ReasonBoot, "Cluster creating")
-		desired.Status.SetAvailableCondition(v1.ConditionFalse, etcdv1alpha1.ReasonBootStrapping,"Cluster creating")
+		desired.Status.SetCondition(etcdv1alpha1.ConditionProgressing, v1.ConditionTrue, etcdv1alpha1.ReasonBoot, "Cluster creating")
+		desired.Status.SetCondition(etcdv1alpha1.ConditionAvailable, v1.ConditionFalse, etcdv1alpha1.ReasonBootStrapping, "Cluster creating")
 		err := r.Client.Patch(ctx, desired, client.MergeFrom(cluster))
 		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, err
 	}
@@ -176,7 +184,6 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	return ctrl.Result{}, nil
 }
-
 
 type Predicate struct{}
 
@@ -252,6 +259,7 @@ func (r *Predicate) Generic(evt event.GenericEvent) bool {
 func (r *EtcdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.clusters = sync.Map{}
 	r.resyncCh = make(chan event.GenericEvent)
+	r.recorder = mgr.GetEventRecorderFor("etc-controller")
 
 	filter := &Predicate{}
 	return ctrl.NewControllerManagedBy(mgr).

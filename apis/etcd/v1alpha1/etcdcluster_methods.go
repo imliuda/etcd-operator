@@ -26,26 +26,13 @@ func (c *EtcdCluster) IsPodPVEnabled() bool {
 	return false
 }
 
-func (cs *EtcdClusterStatus) SetProgressingCondition(reason, message string) {
-	c := newClusterCondition(ConditionProgressing, v1.ConditionTrue, reason, message)
+func (cs *EtcdClusterStatus) SetCondition(t ConditionType, status v1.ConditionStatus, reason, message string) {
+	c := newClusterCondition(t, status, reason, message)
 	cs.setClusterCondition(*c)
 }
 
-func (cs *EtcdClusterStatus) RemoveProgressingCondition() {
-	pos, _ := getClusterCondition(cs, ConditionProgressing)
-	if pos == -1 {
-		return
-	}
-	cs.Conditions = append(cs.Conditions[:pos], cs.Conditions[pos+1:]...)
-}
-
-func (cs *EtcdClusterStatus) SetAvailableCondition(status v1.ConditionStatus, reason, message string) {
-	c := newClusterCondition(ConditionAvailable, status, reason, message)
-	cs.setClusterCondition(*c)
-}
-
-func (cs *EtcdClusterStatus) RemoveAvailableCondition() {
-	pos, _ := getClusterCondition(cs, ConditionAvailable)
+func (cs *EtcdClusterStatus) RemoveCondition(t ConditionType) {
+	pos, _ := getClusterCondition(cs, t)
 	if pos == -1 {
 		return
 	}

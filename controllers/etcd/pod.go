@@ -25,15 +25,15 @@ import (
 )
 
 const (
-	etcdVolumeName                = "etcd-data"
-	etcdVolumeMountDir            = "/var/etcd"
-	dataDir                       = etcdVolumeMountDir + "/data"
-	peerTLSDir                    = "/etc/etcdtls/member/peer-tls"
-	peerTLSVolume                 = "member-peer-tls"
-	serverTLSDir                  = "/etc/etcdtls/member/server-tls"
-	serverTLSVolume               = "member-server-tls"
-	operatorEtcdTLSDir            = "/etc/etcdtls/operator/etcd-tls"
-	operatorEtcdTLSVolume         = "etcd-client-tls"
+	etcdVolumeName        = "etcd-data"
+	etcdVolumeMountDir    = "/var/etcd"
+	dataDir               = etcdVolumeMountDir + "/data"
+	peerTLSDir            = "/etc/etcdtls/member/peer-tls"
+	peerTLSVolume         = "member-peer-tls"
+	serverTLSDir          = "/etc/etcdtls/member/server-tls"
+	serverTLSVolume       = "member-server-tls"
+	operatorEtcdTLSDir    = "/etc/etcdtls/operator/etcd-tls"
+	operatorEtcdTLSVolume = "etcd-client-tls"
 
 	// defaultDNSTimeout is the default maximum allowed time for the init container of the etcd pod
 	// to reverse DNS lookup its IP. The default behavior is to wait forever and has a value of 0.
